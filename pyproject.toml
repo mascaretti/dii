@@ -1,0 +1,24 @@
+[project]
+name = "dii"
+version = "0.1.0"
+description = "Standalone JAX implementation of the Differentiable Information Imbalance, extracted from DADApy."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+dependencies = [
+    "numpy",
+    "jax",
+    "jaxlib",
+    "optax",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["dii*"]
