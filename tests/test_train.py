@@ -36,9 +36,9 @@ def test_DiffImbalance_train1():
     data_A = np.load(filename)
     data_B = weights_ground_truth[np.newaxis, :] * data_A
 
-    expected_weights = [0.13817, 0.04679, 0.09338]
-    expected_imb = 0.03670
-    expected_imb_final = 0.03670
+    expected_weights = [0.13924, 0.04242, 0.09387]
+    expected_imb = 0.05478
+    expected_imb_final = 0.05478
 
     # train the DII to recover ground-truth metric
     dii = DiffImbalance(
@@ -52,8 +52,7 @@ def test_DiffImbalance_train1():
         batches_per_epoch=1,
         l1_strength=0.0,
         point_adapt_lambda=False,
-        k_init=10,
-        k_final=1,
+        k=10,
         lambda_factor=1e-1,
         params_init=None,
         params_groups=None,
@@ -85,9 +84,9 @@ def test_DiffImbalance_train2():
     data_A = np.load(filename)
     data_B = weights_ground_truth[np.newaxis, :] * data_A
 
-    expected_weights = [12.03902, 5.10201, 11.3592]
-    expected_imb = 0.11381
-    expected_imb_final = 0.05178
+    expected_weights = [11.83414, 5.17263, 11.54111]
+    expected_imb = 0.14955
+    expected_imb_final = 0.04635
 
     # train the DII
     dii = DiffImbalance(
@@ -101,8 +100,7 @@ def test_DiffImbalance_train2():
         batches_per_epoch=5,
         l1_strength=1e-4,
         point_adapt_lambda=False,
-        k_init=1,
-        k_final=1,
+        k=1,
         lambda_factor=1e-1,
         params_init=params_init,
         params_groups=None,
@@ -131,10 +129,10 @@ def test_DiffImbalance_train3():
     data_A = np.load(filename)
     data_B = weights_ground_truth[np.newaxis, :] * data_A
 
-    expected_weights = [0.16791, 0.04188, 0.00716]
-    expected_imb = 0.438795
-    expected_imb_final = 0.59615
-    expected_error_final = 0.07216
+    expected_weights = [0.14967, -0.07077, 0.05089]
+    expected_imb = 0.43272
+    expected_imb_final = 0.59785
+    expected_error_final = 0.07628
 
     # train the DII
     dii = DiffImbalance(
@@ -148,14 +146,13 @@ def test_DiffImbalance_train3():
         batches_per_epoch=1,
         l1_strength=0.0,
         point_adapt_lambda=True,
-        k_init=1,
-        k_final=1,
+        k=1,
         lambda_factor=1e-1,
         params_init=None,
         params_groups=None,
         optimizer_name="sgd",
         learning_rate=1e-1,
-        learning_rate_decay="exp",
+        learning_rate_decay="cos",
         num_points_rows=None,
     )
     weights, imbs = dii.train()
@@ -181,10 +178,10 @@ def test_DiffImbalance_train4():
     data_A = np.load(filename)
     data_B = weights_ground_truth[np.newaxis, :] * data_A
 
-    expected_weights = [0.1312, 0.05073, 0.10106]
-    expected_imb = 0.0403795
-    expected_imb_final = 0.08504
-    expected_error_final = 0.01226
+    expected_weights = [0.12785, 0.05922, 0.10074]
+    expected_imb = 0.03108
+    expected_imb_final = 0.09842
+    expected_error_final = 0.01501
 
     # train the DII to recover ground-truth metric
     dii = DiffImbalance(
@@ -198,8 +195,7 @@ def test_DiffImbalance_train4():
         batches_per_epoch=1,
         l1_strength=0.0,
         point_adapt_lambda=False,
-        k_init=1,
-        k_final=1,
+        k=1,
         lambda_factor=1e-1,
         params_init=None,
         params_groups=None,
@@ -233,10 +229,10 @@ def test_DiffImbalance_train5():
     params_init = [1, 0.1]
     params_groups = [2, 1]
 
-    expected_weights = [1, 0.10002]
-    expected_imb = 0.05411
-    expected_imb_final = 0.10039
-    expected_error_final = 0.01771
+    expected_weights = [1.0, 0.10002]
+    expected_imb = 0.03980
+    expected_imb_final = 0.14683
+    expected_error_final = 0.02029
 
     # train the DII to recover ground-truth metric
     dii = DiffImbalance(
@@ -250,8 +246,7 @@ def test_DiffImbalance_train5():
         batches_per_epoch=1,
         l1_strength=0.0,
         point_adapt_lambda=False,
-        k_init=1,
-        k_final=1,
+        k=1,
         lambda_factor=1e-1,
         params_init=params_init,
         params_groups=params_groups,
@@ -286,10 +281,10 @@ def test_DiffImbalance_train6():
         axis=-1
     )
 
-    expected_weights = [0.1312, 0.05073, 0.10106]
-    expected_imb = 0.0403795
-    expected_imb_final = 0.08504
-    expected_error_final = 0.01226
+    expected_weights = [0.12785, 0.05922, 0.10074]
+    expected_imb = 0.03108
+    expected_imb_final = 0.09842
+    expected_error_final = 0.01501
 
     # train the DII to recover ground-truth metric
     dii = DiffImbalance(
@@ -303,8 +298,7 @@ def test_DiffImbalance_train6():
         batches_per_epoch=1,
         l1_strength=0.0,
         point_adapt_lambda=False,
-        k_init=1,
-        k_final=1,
+        k=1,
         lambda_factor=1e-1,
         params_init=None,
         params_groups=None,

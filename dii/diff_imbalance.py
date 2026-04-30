@@ -16,8 +16,6 @@
 """
 The *diff_imbalance* module contains the *DiffImbalance* class, implemented with JAX.
 
-The only method supposed to be called by the user is 'train', which carries out the automatic optimization ot the
-Differential Information as a function of the weights of the features in the first distance space.
 The code can be runned on gpu using the command
     jax.config.update('jax_platform_name', 'gpu') # set 'cpu' or 'gpu'
 """
@@ -101,6 +99,7 @@ def _trainstate_unflatten(aux, children):
 
 jtu.register_pytree_node(_TrainState, _trainstate_flatten, _trainstate_unflatten)
 
+
 # OPTIMIZABLE DISTANCE FUNCTIONS
 # (here new functions may be added for purposes beyond feature selection)
 # ----------------------------------------------------------------------------------------------
@@ -164,8 +163,7 @@ class DiffImbalance:
 
         Example:
             point_adapt_lambda: False
-            k_init: 10
-            k_final: 1
+            k: 10
             lambda_factor=1/10
 
         2. Point-adaptive: lambda is different for each point. For point i, it is set to a fraction of the
@@ -173,12 +171,11 @@ class DiffImbalance:
 
         Example:
             point_adapt_lambda: True
-            k_init: 10
-            k_final: 1
+            k: 10
             lambda_factor=1/10
 
-    As a rule of thumb, we suggest to set k_init and k_final to ~5% of the points in the data set, if mini-
-    batches are not employed, or to ~5% of the points within each mini-batch, if they are employed.
+    As a rule of thumb, we suggest to set k to ~1-5% of the points in the data set, if minibatches are not 
+    employed, or to ~1-5% of the points within each mini-batch, if they are employed.
 
     Attributes:
         data_A (np.array(float), jnp.array(float)): feature space A, matrix of shape (n_points, n_features_A).
@@ -195,15 +192,17 @@ class DiffImbalance:
         batches_per_epoch (int): number of minibatches; must be a divisor of n_points. Each weight update is
             carried out by computing the DII gradient over n_points / batches_per_epoch points. Default is 1,
             which means that the gradient is computed over all the available points (batch GD).
+        track_full_loss (bool): whether to compute the training DII on the full dataset at each training epoch,
+            if minibatches are used (batches_per_epoch > 1). This can be computationally demaning for large 
+            datasets but helps monitoring the convergence of the DII, as its calculation on small minibatches 
+            may be affected by large fluctuations. Default is False.
         seed (int): seed of JAX random generator, default is 0. Different seeds determine different mini-batch
             partitions.
         l1_strength (float): strength of the L1 regularization (LASSO) term. Default is 0.
         point_adapt_lambda (bool): whether to use a global smoothing parameter lambda for the c_ij coefficients
             in the DII (if False), or a different parameter for each point (if True). Default is True.
-        k_init (int): initial rank of neighbors used to set lambda. Ranks are defined starting from 1. If
+        k (int): distance rank of neighbors used to set lambda. Ranks are defined starting from 1. If
             batches_per_epoch > 1, neighbors are recomputed within each mini-batch. Default is 1.
-        k_final (int): final rank of neighbors used to set lambda. If batches_per_epoch > 1, neighbors are
-            recomputed within each mini-batch. Default is 1.
         lambda_factor (float): factor defining the scale of lambda. Default is 0.1.
         params_init (np.array(float), jnp.array(float)): array of shape (n_params,) containing the initial
             values of the scaling weights to be optimized. If params_groups is set to None, each feature is
@@ -219,10 +218,12 @@ class DiffImbalance:
             (default), 'adam' and 'adamw'. See https://optax.readthedocs.io/en/latest/api/optimizers.html for
             additional details.
         learning_rate (float): value of the learning rate. Default is 1e-2.
-        learning_rate_decay (str): schedule to damp the learning rate to zero starting from the value provided
-            with the attribute learning_rate. The available schedules are: cosine decay ("cos"), exponential
-            decay ("exp"; the initial learning rate is halved every 10 steps), or constant learning rate (None).
-            Default is None (constant learning rate).
+        learning_rate_decay (str): schedule to damp the learning rate to zero (or to learning_rate_final, if
+            not None) starting from the value provided with the attribute learning_rate. The available schedules are: 
+            cosine decay ("cos"), or constant learning rate (None). Default is None (constant learning rate).
+        learning_rate_final (float): final value of the learning rate when the "cos" decay schedule is applied.
+            Default is None, for which the learning rate is dumped to zero. If learning_rate_decay=None, this 
+            argument is ignored.
         num_points_rows (int): number of points sampled from the rows of rank and distance matrices. In case of large
             datasets, choosing num_points_rows < n_points can significantly speed up the training. The default is
             None, for which num_points_rows == n_points.
@@ -237,17 +238,18 @@ class DiffImbalance:
         periods_B=None,
         num_epochs=200,
         batches_per_epoch=1,
+        track_full_loss=False,
         seed=0,
         l1_strength=0.0,
         point_adapt_lambda=True,
-        k_init=1,
-        k_final=1,
+        k=1,
         lambda_factor=0.1,
         params_init=None,
         params_groups=None,
         optimizer_name="sgd",
         learning_rate=1e-2,
         learning_rate_decay=None,
+        learning_rate_final=None,
         num_points_rows=None,
     ):
         """Initialise the DiffImbalance class."""
@@ -326,10 +328,10 @@ class DiffImbalance:
             )
         self.num_epochs = num_epochs
         self.batches_per_epoch = batches_per_epoch
+        self.track_full_loss = track_full_loss
         self.l1_strength = l1_strength
         self.point_adapt_lambda = point_adapt_lambda
-        self.k_init = k_init
-        self.k_final = k_final
+        self.k = k
         self.lambda_factor = lambda_factor
         if params_init is not None:
             self.params_init = jnp.array(params_init, dtype=float)
@@ -346,6 +348,7 @@ class DiffImbalance:
         self.optimizer_name = optimizer_name
         self.learning_rate = learning_rate
         self.learning_rate_decay = learning_rate_decay
+        self.learning_rate_final = learning_rate_final
         self.num_points_rows = num_points_rows
         self.mask = None
 
@@ -357,21 +360,20 @@ class DiffImbalance:
             f"Cannot extract {batches_per_epoch} minibatches "
             + f"from {self.nrows} samples."
         )
-        assert (
-            self.k_init is not None and self.k_final is not None
-        ), f"Provide values of 'k_init' and 'k_final' to compute lambda adaptively."
-        if self.k_init > 100:
+        assert self.k is not None, (
+            f"Provide a value of 'k' to compute lambda adaptively."
+        )
+        self.k_max_allowed = 100
+        if self.k > self.k_max_allowed:
             warnings.warn(
-                f"For efficiency reasons the maximum value for 'k_init' is 100, while you set it to {self.k_init}.\n"
-                + f"The run will continue with 'k_init = 100'"
+                f"For efficiency reasons the maximum value for 'k' is {self.k_max_allowed}, while you set it to {self.k}.\n"
+                + f"The run will continue with k = {self.k_max_allowed}"
             )
-            self.k_init = 100
+            self.k = self.k_max_allowed            
         assert (
-            self.k_init >= self.k_final and self.k_final > 0
-        ), f"'k_init' and 'k_final' must satisfy: k_init >= k_final >= 1."
-        assert isinstance(k_init, int) and isinstance(
-            k_final, int
-        ), f"'k_init' and 'k_final' must be positive integers."
+            self.k > 0
+        ), f"'k' must be larger than or equal to 1."
+        assert isinstance(k, int), f"'k' must be a positive integer."
         if self.params_groups is not None:
             n_vars = np.sum(self.params_groups)
             assert n_vars == self.nfeatures_A, (
@@ -430,33 +432,12 @@ class DiffImbalance:
             rank_matrix = dist2_matrix.argsort(axis=1).argsort(axis=1)
             return rank_matrix
 
-        def _cosine_decay_func(start_value, final_value, step):
-            """Implements a cosine decay during the training.
-
-            The arguments start_value and final_value can be values of the learning rate or of the
-            neighbor order used to compute lambda in the adaptive and point-adaptive schemes.
-
-            Args:
-                start_value (float): initial value.
-                final_value (float): final value.
-                step (int): number of current gradient descent step.
-
-            Returns:
-                cosine (float): value of the cosine interpolating start_value at step 0 and final_value
-                    at the last training step.
-            """
-            x = jnp.pi / (self.num_epochs * self.batches_per_epoch) * step
-            cosine = (start_value - final_value) * (jnp.cos(x) + 1) / 2 + final_value
-            return cosine
-
-        def _compute_point_adapt_lambdas(dist2_matrix, step=None, k=None):
+        def _compute_point_adapt_lambdas(dist2_matrix, k):
             """Computes lambda parameters with the point-adaptive scheme, according to the current value of k.
 
             Args:
                 dist2_matrix (jnp.array(float)): matrix of shape (n_points_rows, n_points_columns), containing
                     the squared distances in space A at the current training step.
-                step (int): number of current gradient descent step, from which the current value of 'k' to
-                    compute lambda adaptively is obtained.
                 k (int): neighbor order to set lambda adaptively (alternative to step).
 
             Returns:
@@ -464,20 +445,13 @@ class DiffImbalance:
                     computed adaptively for each point, as the fraction ('lambda_factor', default: 1/10) of the
                     squared distance of the neighbor of order k.
             """
-            if step is not None:
-                current_k = jnp.rint(
-                    _cosine_decay_func(
-                        start_value=self.k_init, final_value=self.k_final, step=step
-                    )
-                ).astype(int)
-            elif k is not None:
-                current_k = k
-            # take the k_max_allowed smallest distances with negative sign
-            k_max_allowed = 100
-            if dist2_matrix.shape[1] < k_max_allowed:
+            k_max_allowed = self.k_max_allowed
+            if dist2_matrix.shape[1] < self.k_max_allowed:
                 k_max_allowed = dist2_matrix.shape[1]
             smallest_dist2, _ = jax.lax.top_k(-dist2_matrix, k_max_allowed)
-            current_lambdas = -smallest_dist2[:, current_k - 1] * self.lambda_factor
+            current_lambdas = (
+                -smallest_dist2[:, self.k - 1] * self.lambda_factor
+            )
 
             # DON'T DELETE: Adaptive scheme of cython code
             # diffs_dists_2nd_1st = -smallest_dist2[:, 1] + smallest_dist2[:, 0]
@@ -485,14 +459,12 @@ class DiffImbalance:
 
             return current_lambdas
 
-        def _compute_adapt_lambda(dist2_matrix, step=None, k=None):
+        def _compute_adapt_lambda(dist2_matrix, k):
             """Computes smoothing parameter lambda with adaptive scheme.
 
             Args:
                 dist2_matrix (jnp.array(float)): matrix of shape (n_points_rows, n_points_columns), containing
                     the squared distances in space A at the current training step.
-                step (int): number of current gradient descent step, from which the current value of 'k' to
-                    compute lambda adaptively is obtained.
                 k (int): neighbor order to set lambda adaptively (alternative to step).
 
             Returns:
@@ -501,12 +473,12 @@ class DiffImbalance:
                     of order k.
             """
             current_lambda = _compute_point_adapt_lambdas(
-                dist2_matrix, step, k
+                dist2_matrix, k
             ).mean() * jnp.ones(dist2_matrix.shape[0])
             return current_lambda
 
         def _compute_training_diff_imbalance(
-            params, batch_A_rows, batch_A_columns, batch_B_ranks, step
+            params, batch_A_rows, batch_A_columns, batch_B_ranks, k
         ):
             """Computes the Differentiable Information Imbalance (DII) at the current step of the training.
 
@@ -539,7 +511,8 @@ class DiffImbalance:
             )
 
             lambdas = self.lambda_method(
-                dist2_matrix=dist2_matrix_A, step=step
+                dist2_matrix=dist2_matrix_A,
+                k=k,
             )  # compute lambda values
             c_matrix = (
                 jax.nn.softmax(  # N.B. diagonal elements already numerically zero
@@ -698,17 +671,13 @@ class DiffImbalance:
                 batch_A_rows=batch_A_rows,
                 batch_A_columns=batch_A_columns,
                 batch_B_ranks=batch_B_ranks,
-                step=state.step,
+                k=self.k,
             )
             # Get loss and gradient
             imb, grads = jax.value_and_grad(loss_fn)(state.params)
 
             # Update parameters
             state = state.apply_gradients(grads=grads)
-            norm_init = jnp.sqrt((self.params_init**2).sum())
-            norm_now = jnp.sqrt((state.params**2).sum())
-            # Scale weight vector to original norm
-            state = state.replace(params=norm_init / norm_now * state.params)
 
             # Apply L1 penalty
             if self.l1_strength != 0:
@@ -732,23 +701,23 @@ class DiffImbalance:
                 #    * (1.0 - jnp.where(state.params * candidate_params < 0, 1.0, 0.0))
                 # )
 
-                # Scale weight vector to original norm
-                norm_now = jnp.sqrt((state.params**2).sum())
-                state = state.replace(params=norm_init / norm_now * state.params)
             return state, imb
 
         # jit compilation of functions
         self._compute_rank_matrix = jax.jit(_compute_rank_matrix)
-        self._cosine_decay_func = jax.jit(_cosine_decay_func)
-        self._compute_point_adapt_lambdas = jax.jit(_compute_point_adapt_lambdas)
+        self._compute_point_adapt_lambdas = jax.jit(
+            _compute_point_adapt_lambdas, static_argnames="k"
+        )
         self._compute_adapt_lambda = jax.jit(_compute_adapt_lambda)
         self._compute_training_diff_imbalance = jax.jit(
-            _compute_training_diff_imbalance
+            _compute_training_diff_imbalance, static_argnames="k"
         )
         self._compute_final_diff_imbalance_and_error = jax.jit(
-            _compute_final_diff_imbalance_and_error
+            _compute_final_diff_imbalance_and_error, static_argnames="k"
         )
-        self._compute_final_diff_imbalance = jax.jit(_compute_final_diff_imbalance)
+        self._compute_final_diff_imbalance = jax.jit(
+            _compute_final_diff_imbalance, static_argnames="k"
+        )
         self._train_step = jax.jit(_train_step)
 
     def _return_mask(self, npoints, discard_close_ind):
@@ -899,23 +868,21 @@ class DiffImbalance:
                 f'Unknown optimizer "{self.optimizer_name.lower()}". Choose among "sgd", "adam" and "adamw".'
             )
 
-        # set the learning rate schedule (cosine decay, exp decay or constant)
+        # set the learning rate schedule (cosine decay or constant)
         if self.learning_rate_decay == "cos":
+            alpha = 0.0
+            if self.learning_rate_final is not None:
+                alpha = self.learning_rate_final / self.learning_rate
             self.lr_schedule = optax.cosine_decay_schedule(
                 init_value=self.learning_rate,
                 decay_steps=self.num_epochs * self.batches_per_epoch,
-            )
-        elif self.learning_rate_decay == "exp":
-            self.lr_schedule = optax.exponential_decay(
-                init_value=self.learning_rate,
-                transition_steps=10,
-                decay_rate=0.5,
+                alpha=alpha
             )
         elif self.learning_rate_decay is None:
             self.lr_schedule = optax.constant_schedule(value=self.learning_rate)
         else:
             raise ValueError(
-                f'Unknown learning rate decay schedule "{self.learning_rate_decay}". Choose among None, "cos" and "exp".'
+                f'Unknown learning rate decay schedule "{self.learning_rate_decay}". Choose among None or "cos".'
             )
         optimizer = opt_class(self.lr_schedule)
 
@@ -951,25 +918,36 @@ class DiffImbalance:
         params_training = jnp.empty(shape=(self.num_epochs + 1, self.nparams))
         imbs_training = jnp.empty(shape=(self.num_epochs + 1,))
         batch_indices = jnp.arange(self.nrows // self.batches_per_epoch)
+        params_training = params_training.at[0].set(self.params_init)
 
-        imb_start = self._compute_training_diff_imbalance(
-            params=self.params_init,
-            batch_A_rows=self.data_A_rows[batch_indices],
-            batch_A_columns=self.data_A_columns[batch_indices],
-            batch_B_ranks=self.ranks_B[batch_indices][:, batch_indices]
-            .argsort(axis=1)
-            .argsort(axis=1),
-            step=0,
-        )
-        # DON'T DELETE: Alternative method for mini-batching (only sample rows)
-        # imb_start = self._compute_training_diff_imbalance(
-        #    params=self.params_init,
-        #    batch_A_rows=self.data_A_rows[batch_indices],
-        #    batch_A_columns=self.data_A_columns,
-        #    batch_B_ranks=self.ranks_B[batch_indices],
-        #    step=0,
-        # )
-        params_training = params_training.at[0].set(jnp.abs(self.params_init))
+        # compute starting DII before training
+        if not self.track_full_loss: # dii over a minibatch
+            imb_start = self._compute_training_diff_imbalance(
+                params=self.params_init,
+                batch_A_rows=self.data_A_rows[batch_indices],
+                batch_A_columns=self.data_A_columns[batch_indices],
+                batch_B_ranks=self.ranks_B[batch_indices][:, batch_indices]
+                .argsort(axis=1)
+                .argsort(axis=1),
+                k=self.k,
+            )
+            # DON'T DELETE: Alternative method for mini-batching (only sample rows)
+            # imb_start = self._compute_training_diff_imbalance(
+            #    params=self.params_init,
+            #    batch_A_rows=self.data_A_rows[batch_indices],
+            #    batch_A_columns=self.data_A_columns,
+            #    batch_B_ranks=self.ranks_B[batch_indices],
+            #    k=self.k,
+            # )
+
+        else: # dii over full dataset
+            imb_start = self._compute_training_diff_imbalance(
+                params=self.params_init,
+                batch_A_rows=self.data_A_rows,
+                batch_A_columns=self.data_A_columns,
+                batch_B_ranks=self.ranks_B,
+                k=self.k * self.batches_per_epoch,
+            )
         imbs_training = imbs_training.at[0].set(imb_start)
 
         # Train over different epochs
@@ -979,8 +957,25 @@ class DiffImbalance:
         for epoch_idx in tqdm(range(1, self.num_epochs + 1), desc=desc):
             self.key, subkey = jax.random.split(self.key, num=2)
             params_now, imb_now = self._train_epoch(subkey)
-            params_training = params_training.at[epoch_idx].set(jnp.abs(params_now))
+            params_training = params_training.at[epoch_idx].set(
+                params_now
+            )
+
+            # overwrite 'imb_now' with DII over full data set if required
+            # (not necessary if training already occurs on a single batch)
+            if self.track_full_loss and self.batches_per_epoch > 1:
+                imb_now = self._compute_training_diff_imbalance(
+                    params=params_now,
+                    batch_A_rows=self.data_A_rows,
+                    batch_A_columns=self.data_A_columns,
+                    batch_B_ranks=self.ranks_B,
+                    k=self.k * self.batches_per_epoch,
+                )
             imbs_training = imbs_training.at[epoch_idx].set(imb_now)
+        
+        # AFTER TRAINING, scale weights such that their norm appears constant during the training
+        norm_init = jnp.sqrt((self.params_init**2).sum())
+        params_training *= norm_init / jnp.sqrt((params_training**2).sum(axis=1, keepdims=True))
         self.params_final = params_training[-1]
         self.params_training = params_training
         self.imbs_training = imbs_training
@@ -1081,7 +1076,7 @@ class DiffImbalance:
             # set k to keep same ration k/N used during DII training
             k = int(
                 jnp.ceil(
-                    self.k_final * self.batches_per_epoch / (discard_close_ind + 1)
+                    self.k * self.batches_per_epoch / (discard_close_ind + 1)
                 )
             )
             imb_final, error_final = self._compute_final_diff_imbalance_and_error(
@@ -1121,7 +1116,7 @@ class DiffImbalance:
             # set k to keep same ratio k/N used during DII training
             k = int(
                 jnp.ceil(
-                    self.k_final
+                    self.k
                     * self.batches_per_epoch
                     * (1 - 2 * discard_close_ind / self.ncolumns)
                 )
@@ -1188,11 +1183,13 @@ class DiffImbalance:
         # Initialize lists to store results
         best_feature_sets = []
         best_diis = []
+        best_diis_training = []
         best_errors = []
         best_weights_list = []
 
         ############################ First evaluate all single features ############################
         single_feature_diis = []
+        single_feature_diis_training = []
         single_feature_errors = []
 
         for feature in range(n_features):
@@ -1212,17 +1209,18 @@ class DiffImbalance:
                 periods_A=self.periods_A,
                 periods_B=self.periods_B,
                 seed=seed,
-                num_epochs=self.num_epochs,
+                num_epochs=0, # no weights to be optimized here!
                 batches_per_epoch=self.batches_per_epoch,
+                track_full_loss=self.track_full_loss,
                 l1_strength=0.0,
                 point_adapt_lambda=self.point_adapt_lambda,
-                k_init=self.k_init,
-                k_final=self.k_final,
+                k=self.k,
                 lambda_factor=self.lambda_factor,
                 params_init=params_init,
                 optimizer_name=self.optimizer_name,
                 learning_rate=self.learning_rate,
                 learning_rate_decay=self.learning_rate_decay,
+                learning_rate_final = self.learning_rate_final,
                 num_points_rows=self.num_points_rows,
             )
 
@@ -1235,8 +1233,12 @@ class DiffImbalance:
                 single_feature_diis.append(
                     float("inf")
                 )  # Use infinity as a large penalty
+                single_feature_diis_training.append(None)
                 single_feature_errors.append(None)
                 continue
+
+            # Save DII over training epochs
+            single_feature_diis_training.append(dii_copy.imbs_training)
 
             # Compute DII on the full dataset
             if compute_error:
@@ -1283,6 +1285,7 @@ class DiffImbalance:
         best_feature = selected_features[0]
         best_feature_sets.append(best_feature)
         best_diis.append(single_feature_diis[selected_indices[0]])
+        best_diis_training.append(single_feature_diis_training[selected_indices[0]])
 
         # Store the optimal weights for the best single feature
         best_weights = np.zeros(n_features)
@@ -1347,15 +1350,16 @@ class DiffImbalance:
                             + len(candidate_features),  # Ensure reproducibility
                             num_epochs=self.num_epochs,
                             batches_per_epoch=self.batches_per_epoch,
+                            track_full_loss=self.track_full_loss,
                             l1_strength=0.0,
                             point_adapt_lambda=self.point_adapt_lambda,
-                            k_init=self.k_init,
-                            k_final=self.k_final,
+                            k=self.k,
                             lambda_factor=self.lambda_factor,
                             params_init=params_init,
                             optimizer_name=self.optimizer_name,
                             learning_rate=self.learning_rate,
                             learning_rate_decay=self.learning_rate_decay,
+                            learning_rate_final = self.learning_rate_final,
                             num_points_rows=self.num_points_rows,
                         )
 
@@ -1446,15 +1450,16 @@ class DiffImbalance:
                 seed=seed,
                 num_epochs=self.num_epochs,
                 batches_per_epoch=self.batches_per_epoch,
+                track_full_loss=self.track_full_loss,
                 l1_strength=0.0,
                 point_adapt_lambda=self.point_adapt_lambda,
-                k_init=self.k_init,
-                k_final=self.k_final,
+                k=self.k,
                 lambda_factor=self.lambda_factor,
                 params_init=params_init,
                 optimizer_name=self.optimizer_name,
                 learning_rate=self.learning_rate,
                 learning_rate_decay=self.learning_rate_decay,
+                learning_rate_final = self.learning_rate_final,
                 num_points_rows=self.num_points_rows,
             )
 
@@ -1467,14 +1472,17 @@ class DiffImbalance:
                 )
                 # Save optimal weights
                 best_weights = np.array(dii_copy.params_final)
+                best_dii_training_now = dii_copy.imbs_training
             except AssertionError as e:
                 print(
                     f"Training failed for best feature set {candidate_features[best_idx]}: {str(e)}"
                 )
                 print(f"Using zero weights for this iteration...")
                 best_weights = np.zeros(n_features)
+                best_dii_training_now = None
 
             best_weights_list.append(best_weights)
+            best_diis_training.append(best_dii_training_now)
 
             # Print the best n-tuple information
             print("------------------------------------------------")
@@ -1490,7 +1498,7 @@ class DiffImbalance:
             if len(best_feature_sets[-1]) == n_features:
                 break
 
-        return best_feature_sets, best_diis, best_errors, best_weights_list
+        return best_feature_sets, best_diis, best_diis_training, best_errors, best_weights_list
 
     def backward_greedy_feature_selection(
         self,
@@ -1523,10 +1531,10 @@ class DiffImbalance:
             discard_close_ind (int): index to discard close points when computing the DII. Default is 0.
 
         Returns:
-            feature_sets (list): list of lists, where each sublist contains the indices of the selected
+            best_feature_sets (list): list of lists, where each sublist contains the indices of the selected
                 features at each iteration.
-            diis (list): list of DII values corresponding to each set of selected features.
-            errors (list): list of error estimates for each DII value. Only meaningful if compute_error is True.
+            best_diis (list): list of DII values corresponding to each set of selected features.
+            best_errors (list): list of error estimates for each DII value. Only meaningful if compute_error is True.
             best_weights_list (list): list of arrays containing the optimal weights for each set of selected features.
         """
         if self.l1_strength != 0.0:
@@ -1539,9 +1547,10 @@ class DiffImbalance:
         n_features = self.nfeatures_A
 
         # Initialize lists to store results
-        feature_sets = []
-        diis = []
-        errors = []
+        best_feature_sets = []
+        best_diis = []
+        best_diis_training = []
+        best_errors = []
         best_weights_list = []
 
         # Start with all features and use the original trained weights
@@ -1555,8 +1564,8 @@ class DiffImbalance:
                 seed=seed,
                 discard_close_ind=discard_close_ind,
             )
-            diis.append(float(self.imb_final))
-            errors.append(float(self.error_final))
+            best_diis.append(float(self.imb_final))
+            best_errors.append(float(self.error_final))
         else:
             self.return_final_dii(
                 compute_error=False,
@@ -1564,8 +1573,8 @@ class DiffImbalance:
                 seed=seed,
                 discard_close_ind=discard_close_ind,
             )
-            diis.append(float(self.imb_final))
-            errors.append(None)
+            best_diis.append(float(self.imb_final))
+            best_errors.append(None)
 
         # Print all-feature information
         print("------------------------------------------------")
@@ -1574,14 +1583,23 @@ class DiffImbalance:
         print(f"\tOptimal weights: {self.params_final}")
         print("------------------------------------------------")
 
-        feature_sets.append(current_features[0].copy())
+        best_feature_sets.append(current_features[0].copy())
         best_weights_list.append(self.params_final)
+        best_diis_training.append(self.imbs_training)
 
         ############################ Greedy loop over n-tuples (n<D) ############################
-        while feature_sets[-1] and len(feature_sets[-1]) > n_features_min:
+        while len(best_feature_sets[-1]) > n_features_min:
             candidate_diis = []
             candidate_errors = []
             candidate_features = []
+
+            n_features_now = len(best_feature_sets[-1]) - 1
+            # Skip training if the input set has size 1
+            if n_features_now == 1:
+                num_epochs_now = 0
+            else:
+                num_epochs_now = self.num_epochs
+
 
             # Generate candidates by removing one feature from each of the current best feature sets
             for selected_set in current_features:
@@ -1621,18 +1639,19 @@ class DiffImbalance:
                         periods_A=self.periods_A,
                         periods_B=self.periods_B,
                         seed=training_seed,
-                        num_epochs=self.num_epochs,
+                        num_epochs=num_epochs_now,
                         batches_per_epoch=self.batches_per_epoch,
+                        track_full_loss=self.track_full_loss,
                         l1_strength=0.0,
                         point_adapt_lambda=self.point_adapt_lambda,
-                        k_init=self.k_init,
-                        k_final=self.k_final,
+                        k=self.k,
                         lambda_factor=self.lambda_factor,
                         params_init=params_init,
                         params_groups=None,
                         optimizer_name=self.optimizer_name,
                         learning_rate=self.learning_rate,
                         learning_rate_decay=self.learning_rate_decay,
+                        learning_rate_final = self.learning_rate_final,
                         num_points_rows=self.num_points_rows,
                     )
 
@@ -1717,18 +1736,19 @@ class DiffImbalance:
                 periods_A=self.periods_A,
                 periods_B=self.periods_B,
                 seed=seed,
-                num_epochs=self.num_epochs,
+                num_epochs=num_epochs_now,
                 batches_per_epoch=self.batches_per_epoch,
+                track_full_loss=self.track_full_loss,
                 l1_strength=0.0,
                 point_adapt_lambda=self.point_adapt_lambda,
-                k_init=self.k_init,
-                k_final=self.k_final,
+                k=self.k,
                 lambda_factor=self.lambda_factor,
                 params_init=params_init,
                 params_groups=None,
                 optimizer_name=self.optimizer_name,
                 learning_rate=self.learning_rate,
                 learning_rate_decay=self.learning_rate_decay,
+                learning_rate_final = self.learning_rate_final,
                 num_points_rows=self.num_points_rows,
             )
 
@@ -1737,24 +1757,27 @@ class DiffImbalance:
                 _, _ = dii_copy.train()
                 # Save optimal weights
                 best_weights = dii_copy.params_final
+                dii_training_now = dii_copy.imbs_training
             except AssertionError as e:
                 print(
                     f"Training failed for best feature set {best_feature_set}: {str(e)}"
                 )
                 print(f"Using zero weights for this iteration...")
                 best_weights = np.zeros(n_features)
+                dii_training_now = None
 
             best_weights_list.append(best_weights)
+            best_diis_training.append(dii_training_now)
 
             # Store results
-            feature_sets.append(best_feature_set.copy())
-            diis.append(candidate_diis[best_idx])
+            best_feature_sets.append(best_feature_set.copy())
+            best_diis.append(candidate_diis[best_idx])
 
             if compute_error:
                 candidate_errors = np.array(candidate_errors)
-                errors.append(candidate_errors[best_idx])
+                best_errors.append(candidate_errors[best_idx])
             else:
-                errors.append(None)
+                best_errors.append(None)
 
             # Print the best n-tuple information
             print("------------------------------------------------")
@@ -1764,4 +1787,4 @@ class DiffImbalance:
             print(f"Selected {n_best_actual} best candidates for next iteration")
             print("------------------------------------------------")
 
-        return feature_sets, diis, errors, best_weights_list
+        return best_feature_sets, best_diis, best_diis_training, best_errors, best_weights_list
