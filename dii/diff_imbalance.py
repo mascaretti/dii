@@ -868,17 +868,20 @@ class DiffImbalance:
                 f'Unknown optimizer "{self.optimizer_name.lower()}". Choose among "sgd", "adam" and "adamw".'
             )
 
-        # set the learning rate schedule (cosine decay or constant)
-        if self.learning_rate_decay == "cos":
+        # set the learning rate schedule (cosine decay or constant). Copies with
+        # num_epochs = 0, which the feature selections use to score single features,
+        # never take a step, and optax rejects a cosine decay over zero steps.
+        decay_steps = self.num_epochs * self.batches_per_epoch
+        if self.learning_rate_decay == "cos" and decay_steps > 0:
             alpha = 0.0
             if self.learning_rate_final is not None:
                 alpha = self.learning_rate_final / self.learning_rate
             self.lr_schedule = optax.cosine_decay_schedule(
                 init_value=self.learning_rate,
-                decay_steps=self.num_epochs * self.batches_per_epoch,
+                decay_steps=decay_steps,
                 alpha=alpha
             )
-        elif self.learning_rate_decay is None:
+        elif self.learning_rate_decay is None or self.learning_rate_decay == "cos":
             self.lr_schedule = optax.constant_schedule(value=self.learning_rate)
         else:
             raise ValueError(
